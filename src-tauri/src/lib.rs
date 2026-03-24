@@ -1,6 +1,7 @@
 use std::io::Read;
 use std::os::unix::net::UnixListener;
 use std::sync::Mutex;
+use base64::Engine;
 use tauri::{Emitter,
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -8,6 +9,10 @@ use tauri::{Emitter,
 };
 
 const SOCKET_PATH: &str = "/tmp/weaver.sock";
+const ENV_LLM_ENDPOINT: &str = "WEAVER_LLM_ENDPOINT";
+const ENV_LLM_MODEL: &str = "WEAVER_LLM_MODEL";
+const ENV_LLM_API_KEY: &str = "WEAVER_LLM_API_KEY";
+const ENV_LLM_SYSTEM_PROMPT: &str = "WEAVER_LLM_SYSTEM_PROMPT";
 
 /// Stores the previously focused window address (Hyprland) or X11 window ID,
 /// captured just before the quick-tray window is shown.
@@ -142,6 +147,103 @@ fn write_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn read_clipboard_image_bytes() -> Option<Vec<u8>> {
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        let out = std::process::Command::new("wl-paste")
+            .args(["--no-newline", "--type", "image/png"])
+            .output()
+            .ok()?;
+        if out.status.success() && !out.stdout.is_empty() {
+            Some(out.stdout)
+        } else {
+            None
+        }
+    } else {
+        let out = std::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "image/png", "-o"])
+            .output()
+            .ok()?;
+        if out.status.success() && !out.stdout.is_empty() {
+            Some(out.stdout)
+        } else {
+            None
+        }
+    }
+}
+
+fn extract_llm_text(response: &serde_json::Value) -> Option<String> {
+    if let Some(text) = response
+        .get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?
+        .as_str()
+    {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(parts) = response
+        .get("choices")?
+        .get(0)?
+        .get("message")?
+        .get("content")?
+        .as_array()
+    {
+        let mut merged = String::new();
+        for part in parts {
+            if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
+                if !merged.is_empty() {
+                    merged.push('\n');
+                }
+                merged.push_str(text.trim());
+            }
+        }
+        let trimmed = merged.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(text) = response.get("text").and_then(|v| v.as_str()) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    None
+}
+
+fn env_trimmed(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+#[derive(serde::Serialize)]
+struct LlmEnvConfig {
+    endpoint: String,
+    model: String,
+    api_key: String,
+    system_prompt: String,
+}
+
+fn get_llm_env_config_internal() -> LlmEnvConfig {
+    LlmEnvConfig {
+        endpoint: env_trimmed(ENV_LLM_ENDPOINT)
+            .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string()),
+        model: env_trimmed(ENV_LLM_MODEL).unwrap_or_else(|| "gpt-4o-mini".to_string()),
+        api_key: env_trimmed(ENV_LLM_API_KEY).unwrap_or_default(),
+        system_prompt: env_trimmed(ENV_LLM_SYSTEM_PROMPT).unwrap_or_else(|| {
+            "Extract all visible text from this image. Return plain text only.".to_string()
+        }),
+    }
+}
+
 // ── Tauri commands ────────────────────────────────────────────────────────────
 
 /// Atomically write text to the clipboard, hide the quick-tray window,
@@ -183,6 +285,105 @@ async fn dismiss_quicktray(app: tauri::AppHandle) -> Result<(), String> {
         let _ = win.hide();
     }
     Ok(())
+}
+
+#[tauri::command]
+async fn analyze_clipboard_image(
+    endpoint: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+    system_prompt: Option<String>,
+) -> Result<String, String> {
+    let env_cfg = get_llm_env_config_internal();
+
+    let endpoint = endpoint
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or(env_cfg.endpoint);
+    let api_key = api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| if env_cfg.api_key.is_empty() { None } else { Some(env_cfg.api_key) });
+    let model = model
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or(env_cfg.model);
+    let prompt = system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .unwrap_or(env_cfg.system_prompt);
+
+    let image = read_clipboard_image_bytes()
+        .ok_or_else(|| "No PNG image found in clipboard".to_string())?;
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(image);
+
+    let payload = serde_json::json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": prompt
+            },
+            {
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "Extract text from this image." },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": format!("data:image/png;base64,{image_base64}")
+                        }
+                    }
+                ]
+            }
+        ],
+        "temperature": 0
+    });
+
+    let client = reqwest::Client::new();
+    let mut req = client
+        .post(endpoint)
+        .header("Content-Type", "application/json");
+
+    if let Some(key) = api_key {
+        if !key.trim().is_empty() {
+            req = req.bearer_auth(key.trim());
+        }
+    }
+
+    let response = req
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    let status = response.status();
+
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("Invalid JSON response: {e}"))?;
+
+    if !status.is_success() {
+        return Err(format!("LLM endpoint returned {}: {body}", status.as_u16()));
+    }
+
+    let text_output = extract_llm_text(&body).ok_or_else(|| "LLM response did not contain text output".to_string())?;
+
+    Ok(text_output)
+}
+
+#[tauri::command]
+fn get_llm_env_config() -> LlmEnvConfig {
+    get_llm_env_config_internal()
 }
 
 // ── Internal app logic ────────────────────────────────────────────────────────
@@ -236,8 +437,18 @@ fn start_ipc_server(app_handle: tauri::AppHandle) {
                     if let Ok(n) = s.read(&mut buf) {
                         let msg = String::from_utf8_lossy(&buf[..n]);
                         match msg.trim() {
-                            "quick-tray" => show_weaver(&app_handle),
-                            "toggle" => toggle_window(&app_handle),
+                            "quick-tray" => {
+                                show_weaver(&app_handle);
+                            },
+                            "toggle" => {
+                                toggle_window(&app_handle);
+                            },
+                            "analyze-image" => {
+                                show_weaver(&app_handle);
+                                // Give it a slight moment to mount if hidden
+                                std::thread::sleep(std::time::Duration::from_millis(50));
+                                let _ = app_handle.emit("analyze-image-shortcut", serde_json::json!({}));
+                            }
                             cmd @ ("append-clip" | "prepend-clip") => {
                                 // base  = current clipboard (text A, already in history)
                                 // selected = highlighted text (text B/C, never copied,
@@ -289,6 +500,7 @@ fn register_hyprland_keybind() {
         ("CTRL ALT, W",    "quick-tray"),
         ("CTRL ALT, down", "append-clip"),
         ("CTRL ALT, up",   "prepend-clip"),
+        ("CTRL ALT, C",    "analyze-image"),
     ];
 
     for (combo, msg) in keybinds {
@@ -320,12 +532,19 @@ fn register_hyprland_keybind() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let _ = dotenvy::dotenv();
+
     tauri::Builder::default()
         .manage(PrevWindow(Mutex::new(None)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_store::Builder::default().build())
-        .invoke_handler(tauri::generate_handler![confirm_paste, dismiss_quicktray])
+        .invoke_handler(tauri::generate_handler![
+            confirm_paste,
+            dismiss_quicktray,
+            analyze_clipboard_image,
+            get_llm_env_config,
+        ])
         .setup(|app| {
             start_ipc_server(app.handle().clone());
             register_hyprland_keybind();

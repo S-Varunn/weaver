@@ -7,7 +7,17 @@ import { invoke } from "@tauri-apps/api/core";
  * the Rust `confirm_paste` command handles clipboard write, window
  * hide, focus restore, and key simulation atomically.
  */
-export default function QuickTray({ history, onClose }) {
+export default function QuickTray({
+  history,
+  onClose,
+  imagePreviewOpen,
+  imageAnalysisLoading,
+  imageAnalysisError,
+  imageAnalyzedText,
+  setImageAnalyzedText,
+  onImageAction,
+  onCloseImagePreview,
+}) {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const listRef = useRef(null);
   const selectedItemRef = useRef(null);
@@ -73,10 +83,39 @@ export default function QuickTray({ history, onClose }) {
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, []); // Empty deps — intentional; relies on refs for current values.
 
+  const renderImagePreview = () => {
+    if (!imagePreviewOpen) return null;
+    return (
+      <section className="image-preview-card qt-image-preview" onClick={(e) => e.stopPropagation()}>
+        <div className="image-preview-header">
+          <h2>Image Text Preview</h2>
+          <button className="btn-pill btn-hide" onClick={onCloseImagePreview}>Close</button>
+        </div>
+
+        {imageAnalysisLoading && <div className="image-preview-info">Analyzing image with LLM...</div>}
+        {imageAnalysisError && <div className="error-banner">Image analysis error: {imageAnalysisError}</div>}
+
+        <textarea
+          className="image-preview-textarea"
+          value={imageAnalyzedText}
+          onChange={(e) => setImageAnalyzedText(e.target.value)}
+          placeholder="Analyzed text will appear here."
+        />
+
+        <div className="image-preview-actions">
+          <button className="btn-pill btn-resume" onClick={() => onImageAction("copy")}>Copy</button>
+          <button className="btn-pill btn-pause" onClick={() => onImageAction("append")}>Append</button>
+          <button className="btn-pill btn-pause" onClick={() => onImageAction("prepend")}>Prepend</button>
+        </div>
+      </section>
+    );
+  };
+
   if (items.length === 0) {
     return (
       <div className="qt-backdrop" onClick={dismiss}>
         <div className="qt-panel">
+          {renderImagePreview()}
           <p className="qt-empty">No clipboard history yet.</p>
         </div>
       </div>
@@ -96,6 +135,7 @@ export default function QuickTray({ history, onClose }) {
           <span className="qt-title">Quick Paste</span>
           <span className="qt-hint">Arrow keys to navigate &middot; Enter or click to paste &middot; Esc to dismiss</span>
         </div>
+        {renderImagePreview()}
         <ul className="qt-list" ref={listRef}>
           {items.map((item, i) => {
             const preview = item.text.length > 120

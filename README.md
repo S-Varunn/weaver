@@ -81,6 +81,25 @@ Install these utilities if you want all keyboard integrations to work:
 pnpm install
 ```
 
+## Environment Configuration
+
+Weaver reads LLM defaults from `.env` in the project root.
+
+1. Copy the template:
+
+```bash
+cp .env.example .env
+```
+
+2. Configure values as needed:
+
+- `WEAVER_LLM_ENDPOINT`
+- `WEAVER_LLM_MODEL`
+- `WEAVER_LLM_API_KEY`
+- `WEAVER_LLM_SYSTEM_PROMPT`
+
+The UI settings panel is still editable; values from `.env` are used as defaults.
+
 ## Running in Development
 
 Run the full Tauri app:

@@ -3,12 +3,23 @@ import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { load } from "@tauri-apps/plugin-store";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 const MAX_HISTORY = 200;
 const POLL_INTERVAL_MS = 500;
 const STORE_FILE = "clipboard-history.json";
 const STORE_KEY = "history";
+const LLM_CONFIG_KEY = "llmConfig";
+
+const DEFAULT_LLM_CONFIG = {
+  endpoint: "http://localhost:11434/v1/chat/completions",
+  model: "gpt-4o-mini",
+  apiKey: "",
+  systemPrompt: "Extract all visible text from this image. Return plain text only.",
+};
+
+const normalizeString = (value) => (typeof value === "string" ? value : "");
 
 function ClipboardItem({ item, index, onCopy, onDelete }) {
   const [copied, setCopied] = useState(false);
@@ -52,6 +63,8 @@ function App() {
   const [search, setSearch] = useState("");
   const [error, setError] = useState(null);
   const [ready, setReady] = useState(false);
+  const [showLlmSettings, setShowLlmSettings] = useState(false);
+  const [llmConfig, setLlmConfig] = useState(DEFAULT_LLM_CONFIG);
   const lastTextRef = useRef(null);
   const intervalRef = useRef(null);
   const storeRef = useRef(null);
@@ -63,9 +76,26 @@ function App() {
         const store = await load(STORE_FILE, { autoSave: false });
         storeRef.current = store;
         const saved = await store.get(STORE_KEY);
+        const savedLlmConfig = await store.get(LLM_CONFIG_KEY);
+        const envLlmConfig = await invoke("get_llm_env_config").catch(() => null);
+
+        const resolvedDefaults = {
+          ...DEFAULT_LLM_CONFIG,
+          endpoint: normalizeString(envLlmConfig?.endpoint) || DEFAULT_LLM_CONFIG.endpoint,
+          model: normalizeString(envLlmConfig?.model) || DEFAULT_LLM_CONFIG.model,
+          apiKey: normalizeString(envLlmConfig?.api_key),
+          systemPrompt:
+            normalizeString(envLlmConfig?.system_prompt) || DEFAULT_LLM_CONFIG.systemPrompt,
+        };
+
+        setLlmConfig(resolvedDefaults);
+
         if (Array.isArray(saved) && saved.length > 0) {
           setHistory(saved);
           lastTextRef.current = saved[0].text;
+        }
+        if (savedLlmConfig && typeof savedLlmConfig === "object") {
+          setLlmConfig((prev) => ({ ...prev, ...savedLlmConfig }));
         }
       } catch (e) {
         console.error("Failed to load store:", e);
@@ -81,12 +111,13 @@ function App() {
     (async () => {
       try {
         await storeRef.current.set(STORE_KEY, history);
+        await storeRef.current.set(LLM_CONFIG_KEY, llmConfig);
         await storeRef.current.save();
       } catch (e) {
         console.error("Failed to save store:", e);
       }
     })();
-  }, [history, ready]);
+  }, [history, llmConfig, ready]);
 
   const addToHistory = useCallback((text) => {
     setHistory((prev) => {
@@ -168,6 +199,7 @@ function App() {
     return () => { if (unlisten) unlisten(); };
   }, []);
 
+
   const handleCopy = async (text) => {
     try {
       await writeText(text);
@@ -207,6 +239,12 @@ function App() {
               </button>
             )}
             <button
+              className="btn-pill btn-pause"
+              onClick={() => setShowLlmSettings((v) => !v)}
+            >
+              LLM Settings
+            </button>
+            <button
               className="btn-pill btn-hide"
               onClick={() => getCurrentWindow().hide()}
               title="Hide to system tray"
@@ -233,6 +271,54 @@ function App() {
             {filtered.length} / {history.length} entries
           </span>
         </div>
+
+        {showLlmSettings && (
+          <div className="llm-settings-card">
+            <div className="llm-settings-grid">
+              <label className="llm-field">
+                <span>Endpoint</span>
+                <input
+                  className="search-input"
+                  type="text"
+                  value={llmConfig.endpoint}
+                  onChange={(e) => setLlmConfig((prev) => ({ ...prev, endpoint: e.target.value }))}
+                  placeholder="https://api.openai.com/v1/chat/completions"
+                />
+              </label>
+              <label className="llm-field">
+                <span>Model</span>
+                <input
+                  className="search-input"
+                  type="text"
+                  value={llmConfig.model}
+                  onChange={(e) => setLlmConfig((prev) => ({ ...prev, model: e.target.value }))}
+                  placeholder="gpt-4o-mini"
+                />
+              </label>
+              <label className="llm-field">
+                <span>API Key (optional)</span>
+                <input
+                  className="search-input"
+                  type="password"
+                  value={llmConfig.apiKey}
+                  onChange={(e) => setLlmConfig((prev) => ({ ...prev, apiKey: e.target.value }))}
+                  placeholder="sk-..."
+                />
+              </label>
+              <label className="llm-field">
+                <span>System Prompt</span>
+                <textarea
+                  className="llm-textarea"
+                  value={llmConfig.systemPrompt}
+                  onChange={(e) => setLlmConfig((prev) => ({ ...prev, systemPrompt: e.target.value }))}
+                />
+              </label>
+            </div>
+            <p className="llm-note">
+              Shortcut for image analysis is currently mapped to Ctrl+Alt+C on Hyprland.
+            </p>
+          </div>
+        )}
       </header>
 
       {error && <div className="error-banner">Clipboard error: {error}</div>}
