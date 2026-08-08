@@ -1,11 +1,11 @@
+use base64::Engine;
 use std::io::Read;
 use std::os::unix::net::UnixListener;
 use std::sync::Mutex;
-use base64::Engine;
-use tauri::{Emitter,
+use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, State,
+    Emitter, Manager, State,
 };
 
 const SOCKET_PATH: &str = "/tmp/weaver.sock";
@@ -67,6 +67,20 @@ fn send_paste_key() {
     } else {
         let _ = std::process::Command::new("xdotool")
             .args(["key", "--clearmodifiers", "ctrl+v"])
+            .status();
+    }
+}
+
+/// Simulate Ctrl+C in the currently focused window before analysis.
+/// Uses `wtype` on Wayland and `xdotool` on X11.
+fn send_copy_key() {
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        let _ = std::process::Command::new("wtype")
+            .args(["-M", "ctrl", "-P", "c", "-p", "c", "-m", "ctrl"])
+            .status();
+    } else {
+        let _ = std::process::Command::new("xdotool")
+            .args(["key", "--clearmodifiers", "ctrl+c"])
             .status();
     }
 }
@@ -147,28 +161,193 @@ fn write_clipboard(text: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn read_clipboard_image_bytes() -> Option<Vec<u8>> {
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        let out = std::process::Command::new("wl-paste")
-            .args(["--no-newline", "--type", "image/png"])
-            .output()
-            .ok()?;
-        if out.status.success() && !out.stdout.is_empty() {
-            Some(out.stdout)
-        } else {
-            None
+struct ClipboardImage {
+    bytes: Vec<u8>,
+    mime_type: String,
+}
+
+fn url_decode(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(hex_str) = std::str::from_utf8(&bytes[i + 1..i + 3]) {
+                if let Ok(byte_val) = u8::from_str_radix(hex_str, 16) {
+                    result.push(byte_val as char);
+                    i += 3;
+                    continue;
+                }
+            }
         }
-    } else {
-        let out = std::process::Command::new("xclip")
-            .args(["-selection", "clipboard", "-t", "image/png", "-o"])
-            .output()
-            .ok()?;
-        if out.status.success() && !out.stdout.is_empty() {
-            Some(out.stdout)
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
+fn try_read_image_file_path(text: &str) -> Option<ClipboardImage> {
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') || line == "copy" || line == "cut" {
+            continue;
+        }
+
+        let path_str = if let Some(stripped) = line.strip_prefix("file://") {
+            url_decode(stripped)
         } else {
-            None
+            url_decode(line)
+        };
+
+        let path = std::path::Path::new(&path_str);
+        if path.is_file() {
+            let ext = path.extension()?.to_str()?.to_lowercase();
+            let mime_type = match ext.as_str() {
+                "png" => "image/png",
+                "jpg" | "jpeg" => "image/jpeg",
+                "webp" => "image/webp",
+                "bmp" => "image/bmp",
+                _ => continue,
+            };
+            if let Ok(bytes) = std::fs::read(path) {
+                if !bytes.is_empty() {
+                    return Some(ClipboardImage {
+                        bytes,
+                        mime_type: mime_type.to_string(),
+                    });
+                }
+            }
         }
     }
+    None
+}
+
+fn read_clipboard_image() -> Option<ClipboardImage> {
+    // 1. Check URI / File list from File Managers (text/uri-list, x-special/gnome-copied-files)
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        for mime in &["text/uri-list", "x-special/gnome-copied-files", "text/plain"] {
+            if let Ok(out) = std::process::Command::new("wl-paste").args(["--no-newline", "--type", mime]).output() {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    if let Some(img) = try_read_image_file_path(&text) {
+                        return Some(img);
+                    }
+                }
+            }
+            if let Ok(out) = std::process::Command::new("wl-paste").args(["--primary", "--no-newline", "--type", mime]).output() {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    if let Some(img) = try_read_image_file_path(&text) {
+                        return Some(img);
+                    }
+                }
+            }
+        }
+    } else {
+        for mime in &["text/uri-list", "x-special/gnome-copied-files", "STRING"] {
+            if let Ok(out) = std::process::Command::new("xclip").args(["-selection", "clipboard", "-t", mime, "-o"]).output() {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    if let Some(img) = try_read_image_file_path(&text) {
+                        return Some(img);
+                    }
+                }
+            }
+            if let Ok(out) = std::process::Command::new("xclip").args(["-selection", "primary", "-t", mime, "-o"]).output() {
+                if out.status.success() {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    if let Some(img) = try_read_image_file_path(&text) {
+                        return Some(img);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Check standard text in clipboard or primary selection for image file paths
+    if let Some(text) = read_clipboard_text().or_else(read_primary_selection) {
+        if let Some(img) = try_read_image_file_path(&text) {
+            return Some(img);
+        }
+    }
+
+    // 3. Check raw image pixel bytes from clipboard / primary selection (e.g. image/png, image/jpeg, etc.)
+    let supported_image_types = [
+        "image/png",
+        "image/jpeg",
+        "image/jpg",
+        "image/webp",
+        "image/bmp",
+        "image/x-png",
+    ];
+
+    if std::env::var("WAYLAND_DISPLAY").is_ok() {
+        if let Ok(types_out) = std::process::Command::new("wl-paste").arg("--list-types").output() {
+            let types_str = String::from_utf8_lossy(&types_out.stdout);
+            for mime in &supported_image_types {
+                if types_str.contains(mime) {
+                    if let Ok(out) = std::process::Command::new("wl-paste").args(["--no-newline", "--type", mime]).output() {
+                        if out.status.success() && !out.stdout.is_empty() {
+                            return Some(ClipboardImage {
+                                bytes: out.stdout,
+                                mime_type: mime.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Ok(types_out) = std::process::Command::new("wl-paste").args(["--primary", "--list-types"]).output() {
+            let types_str = String::from_utf8_lossy(&types_out.stdout);
+            for mime in &supported_image_types {
+                if types_str.contains(mime) {
+                    if let Ok(out) = std::process::Command::new("wl-paste").args(["--primary", "--no-newline", "--type", mime]).output() {
+                        if out.status.success() && !out.stdout.is_empty() {
+                            return Some(ClipboardImage {
+                                bytes: out.stdout,
+                                mime_type: mime.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        if let Ok(targets_out) = std::process::Command::new("xclip").args(["-selection", "clipboard", "-t", "TARGETS", "-o"]).output() {
+            let targets_str = String::from_utf8_lossy(&targets_out.stdout);
+            for mime in &supported_image_types {
+                if targets_str.contains(mime) {
+                    if let Ok(out) = std::process::Command::new("xclip").args(["-selection", "clipboard", "-t", mime, "-o"]).output() {
+                        if out.status.success() && !out.stdout.is_empty() {
+                            return Some(ClipboardImage {
+                                bytes: out.stdout,
+                                mime_type: mime.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Ok(targets_out) = std::process::Command::new("xclip").args(["-selection", "primary", "-t", "TARGETS", "-o"]).output() {
+            let targets_str = String::from_utf8_lossy(&targets_out.stdout);
+            for mime in &supported_image_types {
+                if targets_str.contains(mime) {
+                    if let Ok(out) = std::process::Command::new("xclip").args(["-selection", "primary", "-t", mime, "-o"]).output() {
+                        if out.status.success() && !out.stdout.is_empty() {
+                            return Some(ClipboardImage {
+                                bytes: out.stdout,
+                                mime_type: mime.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 fn extract_llm_text(response: &serde_json::Value) -> Option<String> {
@@ -236,10 +415,10 @@ fn get_llm_env_config_internal() -> LlmEnvConfig {
     LlmEnvConfig {
         endpoint: env_trimmed(ENV_LLM_ENDPOINT)
             .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string()),
-        model: env_trimmed(ENV_LLM_MODEL).unwrap_or_else(|| "gpt-4o-mini".to_string()),
+        model: env_trimmed(ENV_LLM_MODEL).unwrap_or_else(|| "qwen2.5vl:7b".to_string()),
         api_key: env_trimmed(ENV_LLM_API_KEY).unwrap_or_default(),
         system_prompt: env_trimmed(ENV_LLM_SYSTEM_PROMPT).unwrap_or_else(|| {
-            "Extract all visible text from this image. Return plain text only.".to_string()
+            "Perform OCR on this image. Transcribe all text, code, and symbols line by line exactly as shown. Do not skip any lines, summarize, or add commentary. Return raw text only.".to_string()
         }),
     }
 }
@@ -288,6 +467,14 @@ async fn dismiss_quicktray(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+async fn hide_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.hide();
+    }
+    Ok(())
+}
+
+#[tauri::command]
 async fn analyze_clipboard_image(
     endpoint: Option<String>,
     api_key: Option<String>,
@@ -321,9 +508,24 @@ async fn analyze_clipboard_image(
         .map(str::to_string)
         .unwrap_or(env_cfg.system_prompt);
 
-    let image = read_clipboard_image_bytes()
-        .ok_or_else(|| "No PNG image found in clipboard".to_string())?;
-    let image_base64 = base64::engine::general_purpose::STANDARD.encode(image);
+    let prev_text = read_clipboard_text();
+    let mut image_data = read_clipboard_image();
+    if image_data.is_none() {
+        send_copy_key();
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        image_data = read_clipboard_image();
+    }
+
+    // Restore previous clipboard text so intermediate file paths are not left in system clipboard
+    if let Some(prev) = &prev_text {
+        let _ = write_clipboard(prev);
+    }
+
+    let image_data = image_data.ok_or_else(|| {
+        "No image file detected under cursor. Click or select an image file and press Ctrl+Alt+C.".to_string()
+    })?;
+    let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_data.bytes);
+    let mime_type = image_data.mime_type;
 
     let payload = serde_json::json!({
         "model": model,
@@ -335,17 +537,21 @@ async fn analyze_clipboard_image(
             {
                 "role": "user",
                 "content": [
-                    { "type": "text", "text": "Extract text from this image." },
+                    {
+                        "type": "text",
+                        "text": "Transcribe every line of text and code in this image accurately from top to bottom."
+                    },
                     {
                         "type": "image_url",
                         "image_url": {
-                            "url": format!("data:image/png;base64,{image_base64}")
+                            "url": format!("data:{mime_type};base64,{image_base64}")
                         }
                     }
                 ]
             }
         ],
-        "temperature": 0
+        "temperature": 0.1,
+        "max_tokens": 2048
     });
 
     let client = reqwest::Client::new();
@@ -444,8 +650,9 @@ fn start_ipc_server(app_handle: tauri::AppHandle) {
                                 toggle_window(&app_handle);
                             },
                             "analyze-image" => {
+                                send_copy_key();
+                                std::thread::sleep(std::time::Duration::from_millis(100));
                                 show_weaver(&app_handle);
-                                // Give it a slight moment to mount if hidden
                                 std::thread::sleep(std::time::Duration::from_millis(50));
                                 let _ = app_handle.emit("analyze-image-shortcut", serde_json::json!({}));
                             }
@@ -542,6 +749,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             confirm_paste,
             dismiss_quicktray,
+            hide_main_window,
             analyze_clipboard_image,
             get_llm_env_config,
         ])

@@ -4,6 +4,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
+
+import { ThemeProvider } from "./theme/ThemeContext";
 import QuickTray from "./QuickTray";
 import "./App.css";
 
@@ -13,9 +15,9 @@ const LLM_CONFIG_KEY = "llmConfig";
 
 const DEFAULT_LLM_CONFIG = {
   endpoint: "http://localhost:11434/v1/chat/completions",
-  model: "gpt-4o-mini",
+  model: "qwen2.5vl:7b",
   apiKey: "",
-  systemPrompt: "Extract all visible text from this image. Return plain text only.",
+  systemPrompt: "Perform OCR on this image. Transcribe all text, code, and symbols line by line exactly as shown. Do not skip any lines, summarize, or add commentary. Return raw text only.",
 };
 
 const normalizeString = (value) => (typeof value === "string" ? value : "");
@@ -23,9 +25,8 @@ const normalizeString = (value) => (typeof value === "string" ? value : "");
 /**
  * Rendered in the dedicated `quicktray` window (/?quicktray=1).
  * Loads clipboard history from the shared store and mounts QuickTray.
- * History is refreshed each time the window regains focus.
  */
-export default function QuickTrayWindow() {
+function QuickTrayContent() {
   const [history, setHistory] = useState([]);
   const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
   const [imageAnalysisLoading, setImageAnalysisLoading] = useState(false);
@@ -33,7 +34,6 @@ export default function QuickTrayWindow() {
   const [imageAnalyzedText, setImageAnalyzedText] = useState("");
   const [llmConfig, setLlmConfig] = useState(DEFAULT_LLM_CONFIG);
 
-  // Mark body so CSS removes the backdrop overlay in standalone mode.
   useEffect(() => {
     document.body.classList.add("quicktray-mode");
   }, []);
@@ -54,20 +54,19 @@ export default function QuickTrayWindow() {
       const savedLlmConfig = await store.get(LLM_CONFIG_KEY);
       const envLlmConfig = await invoke("get_llm_env_config").catch(() => null);
 
-      const resolvedDefaults = {
-        ...DEFAULT_LLM_CONFIG,
-        endpoint: normalizeString(envLlmConfig?.endpoint) || DEFAULT_LLM_CONFIG.endpoint,
-        model: normalizeString(envLlmConfig?.model) || DEFAULT_LLM_CONFIG.model,
-        apiKey: normalizeString(envLlmConfig?.api_key),
-        systemPrompt:
-          normalizeString(envLlmConfig?.system_prompt) || DEFAULT_LLM_CONFIG.systemPrompt,
+      const envEndpoint = normalizeString(envLlmConfig?.endpoint);
+      const envModel = normalizeString(envLlmConfig?.model);
+      const envApiKey = envLlmConfig?.api_key !== undefined ? normalizeString(envLlmConfig?.api_key) : null;
+      const envPrompt = normalizeString(envLlmConfig?.system_prompt);
+
+      const resolvedConfig = {
+        endpoint: envEndpoint || normalizeString(savedLlmConfig?.endpoint) || DEFAULT_LLM_CONFIG.endpoint,
+        model: envModel || normalizeString(savedLlmConfig?.model) || DEFAULT_LLM_CONFIG.model,
+        apiKey: envApiKey !== null ? envApiKey : (normalizeString(savedLlmConfig?.apiKey) || DEFAULT_LLM_CONFIG.apiKey),
+        systemPrompt: envPrompt || normalizeString(savedLlmConfig?.systemPrompt) || DEFAULT_LLM_CONFIG.systemPrompt,
       };
 
-      if (savedLlmConfig && typeof savedLlmConfig === "object") {
-        setLlmConfig({ ...resolvedDefaults, ...savedLlmConfig });
-      } else {
-        setLlmConfig(resolvedDefaults);
-      }
+      setLlmConfig(resolvedConfig);
     } catch (e) {
       console.error("[quicktray] failed to load llm config:", e);
       setLlmConfig(DEFAULT_LLM_CONFIG);
@@ -86,9 +85,13 @@ export default function QuickTrayWindow() {
           loadLlmConfig();
         }
       })
-      .then((fn) => { unlisten = fn; });
+      .then((fn) => {
+        unlisten = fn;
+      });
 
-    return () => { if (unlisten) unlisten(); };
+    return () => {
+      if (unlisten) unlisten();
+    };
   }, [loadHistory, loadLlmConfig]);
 
   const analyzeClipboardImage = useCallback(async () => {
@@ -122,7 +125,9 @@ export default function QuickTrayWindow() {
       unlisten = fn;
     });
 
-    return () => { if (unlisten) unlisten(); };
+    return () => {
+      if (unlisten) unlisten();
+    };
   }, [analyzeClipboardImage]);
 
   const handleImagePreviewAction = async (action) => {
@@ -139,7 +144,9 @@ export default function QuickTrayWindow() {
       }
 
       out = base.trim()
-        ? (action === "append" ? `${base}\n${text}` : `${text}\n${base}`)
+        ? action === "append"
+          ? `${base}\n${text}`
+          : `${text}\n${base}`
         : text;
     }
 
@@ -166,5 +173,13 @@ export default function QuickTrayWindow() {
       onImageAction={handleImagePreviewAction}
       onCloseImagePreview={() => setImagePreviewOpen(false)}
     />
+  );
+}
+
+export default function QuickTrayWindow() {
+  return (
+    <ThemeProvider>
+      <QuickTrayContent />
+    </ThemeProvider>
   );
 }

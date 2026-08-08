@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ClipboardIcon } from "./components/icons";
+import ImagePreviewModal from "./components/ImagePreviewModal";
 
 /**
  * QuickTray — keyboard-driven clipboard picker shown in a dedicated
@@ -24,19 +26,19 @@ export default function QuickTray({
   const panelRef = useRef(null);
   const items = history.slice(0, 50);
 
-  // Refs ensure the keydown handler always reads current values
-  // without needing to re-register on every render.
   const itemsRef = useRef(items);
   const selectedIndexRef = useRef(selectedIndex);
-  useEffect(() => { itemsRef.current = items; }, [items]);
-  useEffect(() => { selectedIndexRef.current = selectedIndex; }, [selectedIndex]);
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+  useEffect(() => {
+    selectedIndexRef.current = selectedIndex;
+  }, [selectedIndex]);
 
-  // Focus the panel as soon as items are available so keyboard works immediately.
   useEffect(() => {
     if (items.length > 0) panelRef.current?.focus();
   }, [items.length]);
 
-  // Scroll the selected item into view.
   useEffect(() => {
     selectedItemRef.current?.scrollIntoView({ block: "nearest" });
   }, [selectedIndex]);
@@ -45,7 +47,6 @@ export default function QuickTray({
     const item = itemsRef.current[index];
     if (!item) return;
     onClose();
-    // Rust handles everything: wl-copy → window hide → focus restore → wtype
     invoke("confirm_paste", { text: item.text }).catch((e) => {
       console.error("[quicktray] confirm_paste failed:", e);
     });
@@ -58,6 +59,14 @@ export default function QuickTray({
 
   useEffect(() => {
     const onKeyDown = (e) => {
+      if (imagePreviewOpen) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onCloseImagePreview();
+        }
+        return;
+      }
+
       switch (e.key) {
         case "ArrowDown":
           e.preventDefault();
@@ -81,42 +90,30 @@ export default function QuickTray({
     };
     window.addEventListener("keydown", onKeyDown, true);
     return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, []); // Empty deps — intentional; relies on refs for current values.
+  }, [imagePreviewOpen, onCloseImagePreview]);
 
-  const renderImagePreview = () => {
-    if (!imagePreviewOpen) return null;
+  // If OCR image modal is active, render dedicated ImagePreviewModal overlay
+  if (imagePreviewOpen) {
     return (
-      <section className="image-preview-card qt-image-preview" onClick={(e) => e.stopPropagation()}>
-        <div className="image-preview-header">
-          <h2>Image Text Preview</h2>
-          <button className="btn-pill btn-hide" onClick={onCloseImagePreview}>Close</button>
-        </div>
-
-        {imageAnalysisLoading && <div className="image-preview-info">Analyzing image with LLM...</div>}
-        {imageAnalysisError && <div className="error-banner">Image analysis error: {imageAnalysisError}</div>}
-
-        <textarea
-          className="image-preview-textarea"
-          value={imageAnalyzedText}
-          onChange={(e) => setImageAnalyzedText(e.target.value)}
-          placeholder="Analyzed text will appear here."
-        />
-
-        <div className="image-preview-actions">
-          <button className="btn-pill btn-resume" onClick={() => onImageAction("copy")}>Copy</button>
-          <button className="btn-pill btn-pause" onClick={() => onImageAction("append")}>Append</button>
-          <button className="btn-pill btn-pause" onClick={() => onImageAction("prepend")}>Prepend</button>
-        </div>
-      </section>
+      <ImagePreviewModal
+        loading={imageAnalysisLoading}
+        error={imageAnalysisError}
+        text={imageAnalyzedText}
+        setText={setImageAnalyzedText}
+        onAction={onImageAction}
+        onClose={onCloseImagePreview}
+      />
     );
-  };
+  }
 
   if (items.length === 0) {
     return (
       <div className="qt-backdrop" onClick={dismiss}>
         <div className="qt-panel">
-          {renderImagePreview()}
-          <p className="qt-empty">No clipboard history yet.</p>
+          <div className="qt-empty">
+            <ClipboardIcon size={32} className="empty-icon" />
+            <p>No clipboard history yet.</p>
+          </div>
         </div>
       </div>
     );
@@ -132,15 +129,21 @@ export default function QuickTray({
         style={{ outline: "none" }}
       >
         <div className="qt-header">
-          <span className="qt-title">Quick Paste</span>
-          <span className="qt-hint">Arrow keys to navigate &middot; Enter or click to paste &middot; Esc to dismiss</span>
+          <div className="qt-title-group">
+            <ClipboardIcon size={16} className="text-indigo-400" />
+            <span className="qt-title">Quick Paste</span>
+          </div>
+          <span className="qt-hint">
+            <kbd>↑</kbd> <kbd>↓</kbd> navigate &middot; <kbd>Enter</kbd> paste &middot; <kbd>Esc</kbd> dismiss
+          </span>
         </div>
-        {renderImagePreview()}
+
         <ul className="qt-list" ref={listRef}>
           {items.map((item, i) => {
-            const preview = item.text.length > 120
-              ? item.text.slice(0, 120) + "\u2026"
-              : item.text;
+            const preview =
+              item.text.length > 130
+                ? item.text.slice(0, 130) + "\u2026"
+                : item.text;
             const isSelected = i === selectedIndex;
             return (
               <li
@@ -148,7 +151,10 @@ export default function QuickTray({
                 ref={isSelected ? selectedItemRef : null}
                 className={`qt-item ${isSelected ? "qt-item--selected" : ""}`}
                 onMouseEnter={() => setSelectedIndex(i)}
-                onClick={(e) => { e.stopPropagation(); confirm(i); }}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  confirm(i);
+                }}
               >
                 <span className="qt-item-index">{i + 1}</span>
                 <span className="qt-item-preview">{preview}</span>
@@ -157,9 +163,12 @@ export default function QuickTray({
             );
           })}
         </ul>
+
         <div className="qt-footer">
-          <span>{items.length} item{items.length !== 1 ? "s" : ""}</span>
-          <span>Enter or click to paste</span>
+          <span>{items.length} item{items.length !== 1 ? "s" : ""} in history</span>
+          <div className="qt-legend">
+            <span>Press <kbd>Enter</kbd> or click to paste</span>
+          </div>
         </div>
       </div>
     </div>

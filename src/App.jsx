@@ -4,6 +4,14 @@ import { load } from "@tauri-apps/plugin-store";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+
+import { ThemeProvider } from "./theme/ThemeContext";
+import Header from "./components/Header";
+import SearchBar from "./components/SearchBar";
+import ClipboardItem from "./components/ClipboardItem";
+import LlmSettingsModal from "./components/LlmSettingsModal";
+import { ClipboardIcon } from "./components/icons";
+
 import "./App.css";
 
 const MAX_HISTORY = 200;
@@ -14,50 +22,14 @@ const LLM_CONFIG_KEY = "llmConfig";
 
 const DEFAULT_LLM_CONFIG = {
   endpoint: "http://localhost:11434/v1/chat/completions",
-  model: "gpt-4o-mini",
+  model: "qwen2.5vl:7b",
   apiKey: "",
-  systemPrompt: "Extract all visible text from this image. Return plain text only.",
+  systemPrompt: "Perform OCR on this image. Transcribe all text, code, and symbols line by line exactly as shown. Do not skip any lines, summarize, or add commentary. Return raw text only.",
 };
 
 const normalizeString = (value) => (typeof value === "string" ? value : "");
 
-function ClipboardItem({ item, index, onCopy, onDelete }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = async () => {
-    await onCopy(item.text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
-  };
-
-  const preview = item.text.length > 200 ? item.text.slice(0, 200) + "\u2026" : item.text;
-  const lineCount = item.text.split("\n").length;
-  const isMultiline = lineCount > 1;
-
-  return (
-    <div className="clip-item">
-      <div className="clip-meta">
-        <span className="clip-index">#{index + 1}</span>
-        <span className="clip-time">{item.time}</span>
-        {isMultiline && <span className="clip-badge">{lineCount} lines</span>}
-        {item.text.length > 200 && (
-          <span className="clip-badge">{item.text.length} chars</span>
-        )}
-      </div>
-      <pre className="clip-text">{preview}</pre>
-      <div className="clip-actions">
-        <button className={`btn-copy ${copied ? "btn-copied" : ""}`} onClick={handleCopy}>
-          {copied ? "Copied" : "Copy"}
-        </button>
-        <button className="btn-delete" onClick={() => onDelete(index)}>
-          Delete
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function App() {
+function AppContent() {
   const [history, setHistory] = useState([]);
   const [paused, setPaused] = useState(false);
   const [search, setSearch] = useState("");
@@ -65,11 +37,12 @@ function App() {
   const [ready, setReady] = useState(false);
   const [showLlmSettings, setShowLlmSettings] = useState(false);
   const [llmConfig, setLlmConfig] = useState(DEFAULT_LLM_CONFIG);
+
   const lastTextRef = useRef(null);
   const intervalRef = useRef(null);
   const storeRef = useRef(null);
 
-  // Load persisted history on mount
+  // Load persisted history & configuration on mount
   useEffect(() => {
     (async () => {
       try {
@@ -79,23 +52,23 @@ function App() {
         const savedLlmConfig = await store.get(LLM_CONFIG_KEY);
         const envLlmConfig = await invoke("get_llm_env_config").catch(() => null);
 
-        const resolvedDefaults = {
-          ...DEFAULT_LLM_CONFIG,
-          endpoint: normalizeString(envLlmConfig?.endpoint) || DEFAULT_LLM_CONFIG.endpoint,
-          model: normalizeString(envLlmConfig?.model) || DEFAULT_LLM_CONFIG.model,
-          apiKey: normalizeString(envLlmConfig?.api_key),
-          systemPrompt:
-            normalizeString(envLlmConfig?.system_prompt) || DEFAULT_LLM_CONFIG.systemPrompt,
+        const envEndpoint = normalizeString(envLlmConfig?.endpoint);
+        const envModel = normalizeString(envLlmConfig?.model);
+        const envApiKey = envLlmConfig?.api_key !== undefined ? normalizeString(envLlmConfig?.api_key) : null;
+        const envPrompt = normalizeString(envLlmConfig?.system_prompt);
+
+        const resolvedConfig = {
+          endpoint: envEndpoint || normalizeString(savedLlmConfig?.endpoint) || DEFAULT_LLM_CONFIG.endpoint,
+          model: envModel || normalizeString(savedLlmConfig?.model) || DEFAULT_LLM_CONFIG.model,
+          apiKey: envApiKey !== null ? envApiKey : (normalizeString(savedLlmConfig?.apiKey) || DEFAULT_LLM_CONFIG.apiKey),
+          systemPrompt: envPrompt || normalizeString(savedLlmConfig?.systemPrompt) || DEFAULT_LLM_CONFIG.systemPrompt,
         };
 
-        setLlmConfig(resolvedDefaults);
+        setLlmConfig(resolvedConfig);
 
         if (Array.isArray(saved) && saved.length > 0) {
           setHistory(saved);
           lastTextRef.current = saved[0].text;
-        }
-        if (savedLlmConfig && typeof savedLlmConfig === "object") {
-          setLlmConfig((prev) => ({ ...prev, ...savedLlmConfig }));
         }
       } catch (e) {
         console.error("Failed to load store:", e);
@@ -105,7 +78,7 @@ function App() {
     })();
   }, []);
 
-  // Persist whenever history changes
+  // Persist whenever history or llmConfig changes
   useEffect(() => {
     if (!ready || !storeRef.current) return;
     (async () => {
@@ -119,19 +92,53 @@ function App() {
     })();
   }, [history, llmConfig, ready]);
 
+  const getCurrentTime = () => {
+    return new Date().toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  };
+
   const addToHistory = useCallback((text) => {
     setHistory((prev) => {
+      // 1. If text is identical to top item, do nothing
       if (prev.length > 0 && prev[0].text === text) return prev;
-      const now = new Date();
-      const time = now.toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
-      const newEntry = { text, time, id: Date.now() };
+
+      // 2. Exact match check: if this text already exists in history, move it to top with updated time
+      const exactIndex = prev.findIndex((item) => item.text === text);
+      if (exactIndex !== -1) {
+        const item = prev[exactIndex];
+        const rest = prev.filter((_, i) => i !== exactIndex);
+        return [{ ...item, time: getCurrentTime() }, ...rest];
+      }
+
+      // 3. Append / Prepend check: if text is an append or prepend to an existing item in history, update that item in place!
+      const appendPrependIndex = prev.findIndex(
+        (item) =>
+          text.startsWith(item.text + "\n") || text.endsWith("\n" + item.text)
+      );
+
+      if (appendPrependIndex !== -1) {
+        const targetItem = prev[appendPrependIndex];
+        const updatedItem = { ...targetItem, text, time: getCurrentTime() };
+        const rest = prev.filter((_, i) => i !== appendPrependIndex);
+        return [updatedItem, ...rest];
+      }
+
+      // 4. Otherwise, insert new item at top
+      const newEntry = { text, time: getCurrentTime(), id: Date.now() };
       return [newEntry, ...prev].slice(0, MAX_HISTORY);
     });
   }, []);
+
+const isImageFilePath = (str) => {
+  if (typeof str !== "string") return false;
+  const trimmed = str.trim();
+  const path = trimmed.startsWith("file://") ? trimmed.slice(7) : trimmed;
+  const ext = path.split(".").pop()?.toLowerCase();
+  return ["png", "jpg", "jpeg", "webp", "bmp", "x-png"].includes(ext);
+};
 
   const pollClipboard = useCallback(async () => {
     try {
@@ -139,11 +146,13 @@ function App() {
       setError(null);
       if (text && text !== lastTextRef.current) {
         lastTextRef.current = text;
-        addToHistory(text);
+        if (!isImageFilePath(text)) {
+          addToHistory(text);
+        }
       }
     } catch (e) {
       const msg = String(e);
-      // Suppress expected benign errors across platforms
+      // Suppress benign platform clipboard errors
       if (
         !msg.toLowerCase().includes("empty") &&
         !msg.toLowerCase().includes("no text") &&
@@ -165,19 +174,11 @@ function App() {
     return () => clearInterval(intervalRef.current);
   }, [paused, pollClipboard, ready]);
 
-  // Listen for merge-clipboard events emitted by the Rust backend when the
-  // user triggers Ctrl+Alt+Down (append) or Ctrl+Alt+Up (prepend).
-  //
-  // Rust has already written the merged text to the clipboard before emitting.
-  // Our job here is just to update history: replace the base entry with the
-  // merged one, and ensure the selected text never appears as its own entry.
+  // Listen for Rust backend merge-clipboard events (Ctrl+Alt+Down / Ctrl+Alt+Up)
   useEffect(() => {
     let unlisten;
     listen("merge-clipboard", (event) => {
       const { base, merged } = event.payload;
-
-      // Update lastTextRef so the poller treats the merged text as the
-      // current clipboard and does not add it as a duplicate entry.
       lastTextRef.current = merged;
 
       setHistory((prev) => {
@@ -189,22 +190,29 @@ function App() {
         });
         const mergedEntry = { text: merged, time, id: Date.now() };
 
-        // Replace the base entry with the merged entry.
-        const rest = prev.filter((item) => item.text !== base && item.text !== merged);
+        const rest = prev.filter(
+          (item) => item.text !== base && item.text !== merged
+        );
         return [mergedEntry, ...rest].slice(0, MAX_HISTORY);
       });
     }).then((fn) => {
       unlisten = fn;
     });
-    return () => { if (unlisten) unlisten(); };
-  }, []);
 
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   const handleCopy = async (text) => {
     try {
       await writeText(text);
     } catch {
-      try { await navigator.clipboard.writeText(text); } catch { /* ignore */ }
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        /* ignore fallback */
+      }
     }
   };
 
@@ -214,6 +222,9 @@ function App() {
 
   const handleClearAll = () => setHistory([]);
 
+  const handleLlmConfigChange = (key, value) => {
+    setLlmConfig((prev) => ({ ...prev, [key]: value }));
+  };
 
   const filtered = search.trim()
     ? history.filter((item) =>
@@ -221,114 +232,61 @@ function App() {
       )
     : history;
 
+  const handleUpdate = useCallback((realIndex, newText) => {
+    setHistory((prev) => {
+      const next = [...prev];
+      if (next[realIndex]) {
+        next[realIndex] = { ...next[realIndex], text: newText };
+      }
+      return next;
+    });
+  }, []);
+
   return (
     <div className="app">
-      <header className="app-header">
-        <div className="header-top">
-          <h1 className="app-title">Weaver</h1>
-          <div className="header-actions">
-            <button
-              className={`btn-pill ${paused ? "btn-resume" : "btn-pause"}`}
-              onClick={() => setPaused((p) => !p)}
-            >
-              {paused ? "Resume" : "Pause"}
-            </button>
-            {history.length > 0 && (
-              <button className="btn-pill btn-clear" onClick={handleClearAll}>
-                Clear all
-              </button>
-            )}
-            <button
-              className="btn-pill btn-pause"
-              onClick={() => setShowLlmSettings((v) => !v)}
-            >
-              LLM Settings
-            </button>
-            <button
-              className="btn-pill btn-hide"
-              onClick={() => getCurrentWindow().hide()}
-              title="Hide to system tray"
-            >
-              Hide
-            </button>
-          </div>
-        </div>
+      <Header
+        paused={paused}
+        onTogglePause={() => setPaused((p) => !p)}
+        historyCount={history.length}
+        onClearAll={handleClearAll}
+        showLlmSettings={showLlmSettings}
+        onToggleLlmSettings={() => setShowLlmSettings((v) => !v)}
+        onHideWindow={async () => {
+          try {
+            await invoke("hide_main_window");
+          } catch {
+            try {
+              await getCurrentWindow().hide();
+            } catch (e) {
+              console.error("[weaver] hide failed:", e);
+            }
+          }
+        }}
+      />
 
-        <input
-          className="search-input"
-          type="text"
-          placeholder="Search clipboard history"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
+      <div style={{ padding: "0 16px 4px 16px" }}>
+        <SearchBar
+          search={search}
+          onSearchChange={setSearch}
+          filteredCount={filtered.length}
+          totalCount={history.length}
         />
+      </div>
 
-        <div className="status-bar">
-          <span className={`status-dot ${paused ? "dot-paused" : "dot-active"}`} />
-          <span className="status-text">
-            {paused ? "Paused" : "Watching clipboard"}
-          </span>
-          <span className="status-count">
-            {filtered.length} / {history.length} entries
-          </span>
-        </div>
-
-        {showLlmSettings && (
-          <div className="llm-settings-card">
-            <div className="llm-settings-grid">
-              <label className="llm-field">
-                <span>Endpoint</span>
-                <input
-                  className="search-input"
-                  type="text"
-                  value={llmConfig.endpoint}
-                  onChange={(e) => setLlmConfig((prev) => ({ ...prev, endpoint: e.target.value }))}
-                  placeholder="https://api.openai.com/v1/chat/completions"
-                />
-              </label>
-              <label className="llm-field">
-                <span>Model</span>
-                <input
-                  className="search-input"
-                  type="text"
-                  value={llmConfig.model}
-                  onChange={(e) => setLlmConfig((prev) => ({ ...prev, model: e.target.value }))}
-                  placeholder="gpt-4o-mini"
-                />
-              </label>
-              <label className="llm-field">
-                <span>API Key (optional)</span>
-                <input
-                  className="search-input"
-                  type="password"
-                  value={llmConfig.apiKey}
-                  onChange={(e) => setLlmConfig((prev) => ({ ...prev, apiKey: e.target.value }))}
-                  placeholder="sk-..."
-                />
-              </label>
-              <label className="llm-field">
-                <span>System Prompt</span>
-                <textarea
-                  className="llm-textarea"
-                  value={llmConfig.systemPrompt}
-                  onChange={(e) => setLlmConfig((prev) => ({ ...prev, systemPrompt: e.target.value }))}
-                />
-              </label>
-            </div>
-            <p className="llm-note">
-              Shortcut for image analysis is currently mapped to Ctrl+Alt+C on Hyprland.
-            </p>
-          </div>
-        )}
-      </header>
-
-      {error && <div className="error-banner">Clipboard error: {error}</div>}
+      {error && <div className="error-banner">Clipboard issue: {error}</div>}
 
       <main className="clip-list">
         {filtered.length === 0 ? (
           <div className="empty-state">
-            {history.length === 0
-              ? "Start copying — entries will appear here and persist across sessions."
-              : "No results match your search."}
+            <ClipboardIcon size={40} className="empty-icon" />
+            <h3 className="empty-title">
+              {history.length === 0 ? "Clipboard is empty" : "No matching results"}
+            </h3>
+            <p className="empty-desc">
+              {history.length === 0
+                ? "Copy any text using Ctrl+C — entries will automatically appear here and persist across sessions."
+                : "No clipboard entries match your current search query."}
+            </p>
           </div>
         ) : (
           filtered.map((item, i) => (
@@ -341,13 +299,30 @@ function App() {
                 const realIndex = history.findIndex((h) => h.id === item.id);
                 handleDelete(realIndex);
               }}
+              onUpdate={(_, newText) => {
+                const realIndex = history.findIndex((h) => h.id === item.id);
+                handleUpdate(realIndex, newText);
+              }}
             />
           ))
         )}
       </main>
+
+      {showLlmSettings && (
+        <LlmSettingsModal
+          config={llmConfig}
+          onChange={handleLlmConfigChange}
+          onClose={() => setShowLlmSettings(false)}
+        />
+      )}
     </div>
   );
 }
 
-export default App;
-
+export default function App() {
+  return (
+    <ThemeProvider>
+      <AppContent />
+    </ThemeProvider>
+  );
+}

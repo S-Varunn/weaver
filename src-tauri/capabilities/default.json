@@ -5,6 +5,7 @@
   "windows": ["main", "quicktray"],
   "permissions": [
     "core:default",
+    "core:window:allow-hide",
     "opener:default",
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
