@@ -57,36 +57,72 @@ fn focus_previous_window(prev: &str) {
     }
 }
 
-/// Simulate Ctrl+V in the currently focused window.
-/// Uses `wtype` on Wayland and `xdotool` on X11.
+/// Simulate Ctrl+V (or Cmd+V on macOS) in the currently focused window.
 fn send_paste_key() {
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        let _ = std::process::Command::new("wtype")
-            .args(["-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"])
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("powershell")
+            .args(["-Command", "$wshell = New-Object -ComObject wscript.shell; $wshell.SendKeys('^v')"])
             .status();
-    } else {
-        let _ = std::process::Command::new("xdotool")
-            .args(["key", "--clearmodifiers", "ctrl+v"])
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to keystroke \"v\" using command down"])
             .status();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+            let _ = std::process::Command::new("wtype")
+                .args(["-M", "ctrl", "-P", "v", "-p", "v", "-m", "ctrl"])
+                .status();
+        } else {
+            let _ = std::process::Command::new("xdotool")
+                .args(["key", "--clearmodifiers", "ctrl+v"])
+                .status();
+        }
     }
 }
 
-/// Simulate Ctrl+C in the currently focused window before analysis.
-/// Uses `wtype` on Wayland and `xdotool` on X11.
+/// Simulate Ctrl+C (or Cmd+C on macOS) in the currently focused window before analysis.
 fn send_copy_key() {
-    if std::env::var("WAYLAND_DISPLAY").is_ok() {
-        let _ = std::process::Command::new("wtype")
-            .args(["-M", "ctrl", "-P", "c", "-p", "c", "-m", "ctrl"])
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("powershell")
+            .args(["-Command", "$wshell = New-Object -ComObject wscript.shell; $wshell.SendKeys('^c')"])
             .status();
-    } else {
-        let _ = std::process::Command::new("xdotool")
-            .args(["key", "--clearmodifiers", "ctrl+c"])
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("osascript")
+            .args(["-e", "tell application \"System Events\" to keystroke \"c\" using command down"])
             .status();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if std::env::var("WAYLAND_DISPLAY").is_ok() {
+            let _ = std::process::Command::new("wtype")
+                .args(["-M", "ctrl", "-P", "c", "-p", "c", "-m", "ctrl"])
+                .status();
+        } else {
+            let _ = std::process::Command::new("xdotool")
+                .args(["key", "--clearmodifiers", "ctrl+c"])
+                .status();
+        }
     }
 }
 
-/// Read the current clipboard text using `wl-paste` (Wayland) or `xclip` (X11).
+/// Read current clipboard text using arboard with OS fallbacks.
 fn read_clipboard_text() -> Option<String> {
+    if let Ok(mut board) = arboard::Clipboard::new() {
+        if let Ok(text) = board.get_text() {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
         let out = std::process::Command::new("wl-paste")
             .arg("--no-newline")
@@ -134,10 +170,14 @@ fn read_primary_selection() -> Option<String> {
     }
 }
 
-/// Write text to the system clipboard using `wl-copy` (Wayland) or `xclip` (X11).
+/// Write text to the system clipboard using arboard with OS fallbacks.
 fn write_clipboard(text: &str) -> Result<(), String> {
+    if let Ok(mut board) = arboard::Clipboard::new() {
+        if board.set_text(text.to_string()).is_ok() {
+            return Ok(());
+        }
+    }
     use std::io::Write;
-
     if std::env::var("WAYLAND_DISPLAY").is_ok() {
         let mut child = std::process::Command::new("wl-copy")
             .stdin(std::process::Stdio::piped())

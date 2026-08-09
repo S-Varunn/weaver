@@ -1,213 +1,180 @@
 # Weaver
 
-Weaver is a desktop clipboard manager built with Tauri 2 and React. It provides:
+Weaver is a fast, shortcut based desktop clipboard manager and context composer built with Tauri 2, Rust, and React. I made weaver with the idea to reduce the context switching i do with ai agents. The idea is to make it so that you never have to switch windows to copy and paste context for ai agents.
 
-- Persistent clipboard history
-- A fast quick-paste picker window
-- System tray operation (runs in the background)
-- Hyprland-friendly global keybind behavior via IPC
-- Append/prepend composition using highlighted text without copying it directly
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Core Features](#core-features)
-- [Technology Stack](#technology-stack)
-- [Requirements](#requirements)
-- [Installation](#installation)
-- [Running in Development](#running-in-development)
-- [Usage](#usage)
-- [Architecture](#architecture)
-- [Keyboard Shortcuts](#keyboard-shortcuts)
-- [Troubleshooting](#troubleshooting)
+---
 
 ## Overview
 
-Weaver is designed for Linux desktop workflows where quick keyboard-driven paste and history navigation are important. The app runs with a hidden main window, exposes controls through a tray icon, and opens a dedicated transparent quick-paste window when requested.
+Weaver was created specifically to streamline developer workflows with AI agents, LLMs, and multi file coding environments.
 
-For Hyprland/Wayland compatibility, Weaver uses a Unix domain socket plus compositor keybinds, instead of relying only on in-app global shortcut listeners.
+When pairing with AI assistants (such as ChatGPT, Claude, Cursor, or local LLMs), developers frequently gather context from disparate sources: error logs from terminal outputs, API types from documentation, database schemas, and code blocks from multiple IDE tabs.
 
-## Core Features
+Normally, assembling this context requires heavy window switching:
+1. Copy code snippet A in your editor.
+2. Alt-Tab to the AI chat window and paste snippet A.
+3. Alt-Tab back to the terminal and copy an error log.
+4. Alt-Tab back to the AI chat window and paste the error log.
+5. Repeat for documentation or additional context.
 
-- Clipboard polling with deduplicated history
-- Searchable clipboard list with copy and delete actions
-- Persistent history storage across app restarts
-- Quick-paste overlay with keyboard navigation
-- Append/prepend workflow using highlighted text:
-	- Copy text A normally
-	- Highlight text B (do not copy)
-	- Append or prepend B to A using shortcut keys
-	- Clipboard becomes merged content; highlighted text does not enter history as a standalone copied item
+Weaver eliminates this context switching by introducing **Prompt Weaving**. Without leaving your code editor, terminal, or browser, you can highlight text across multiple windows and use global hotkeys to append or prepend selections into a single unified clipboard entry. Once your prompt is woven together, you switch to your AI agent window once and paste your complete, structured prompt in a single action.
+
+---
+
+## Key Features
+
+### Prompt Weaving (Append & Prepend)
+- **Append (`Ctrl+Alt+Down`)**: Select any text on screen and press `Ctrl+Alt+Down` to merge it to the bottom of your current clipboard item.
+- **Prepend (`Ctrl+Alt+Up`)**: Select any text on screen and press `Ctrl+Alt+Up` to merge it to the top of your current clipboard item.
+- **Clean History**: Highlighted text used during weaving is merged in place and does not pollute your clipboard history with intermediate standalone entries.
+
+### One-Shortcut AI Image OCR (`Ctrl+Alt+C`)
+- Click or select any image file (`.png`, `.jpg`, `.jpeg`, `.webp`, `.bmp`) in your file manager or browser and press `Ctrl+Alt+C`.
+- Weaver reads the image file directly and sends it to a local vision model (`qwen2.5vl:7b` via Ollama) or remote OpenAI-compatible endpoint.
+- Transcribes all text, code, and symbols line-by-line without truncating code blocks.
+- Intermediate image file paths are automatically excluded from your clipboard history list.
+
+### Floating Quick Paste Palette (`Ctrl+Alt+W`)
+- Press `Ctrl+Alt+W` anywhere on your desktop to summon an always-on-top, transparent floating paste picker overlay.
+- Search clipboard history in real-time or navigate with arrow keys.
+- Press `Enter` or click an item to hide the picker, restore focus to your active window, and automatically send `Ctrl+V`.
+
+### Full Text Scrolling & Expand/Collapse Views
+- Code blocks and text entries are rendered in full without truncation (`slice(0, 300)` is removed).
+- Integrated smooth vertical scrolling with custom scrollbars.
+- Expand / Collapse height toggle button for long entries (up to 480px view height).
+
+### Permanent Inline Editing
+- Edit any item in your clipboard history directly by double-clicking the text block or clicking the **Edit** button.
+- An interactive monospace text area allows you to modify code snippets before pasting.
+- Edits persist permanently to disk, update the system clipboard, and support subsequent append/prepend operations without creating duplicate entries.
+
+### Smart In-Place Matching
+- When appending, prepending, or editing an existing history entry, Weaver updates the target entry **in place** and moves it to the top of your history rather than spawning duplicate entries.
+
+### Light, Dark, and Device-Aware Themes
+- Automatic device theme detection matching system preference (`prefers-color-scheme`).
+- Includes a 3-way segmented toggle (`System`, `Dark`, `Light`) in the main interface.
+
+### Native Linux / Wayland & X11 Integration
+- Implements a Unix domain socket server listening at `/tmp/weaver.sock` for reliable compositor shortcut execution on Wayland (Hyprland) and X11.
+- Automatically prevents duplicate keybind registrations at startup.
+
+---
+
+## Keyboard Shortcuts
+
+| Shortcut | Action | Description |
+| :--- | :--- | :--- |
+| `Ctrl + Alt + W` | Toggle Quick Palette | Opens floating transparent picker overlay over active window |
+| `Ctrl + Alt + Down` | Append to Clipboard | Merges selected text to the bottom of the active clipboard entry |
+| `Ctrl + Alt + Up` | Prepend to Clipboard | Merges selected text to the top of the active clipboard entry |
+| `Ctrl + Alt + C` | AI Image OCR Analysis | Transcribes clicked or selected image file into raw text |
+| `Enter` / Click | Confirm Paste | Pastes selected item into previously active window and hides picker |
+| `Escape` | Dismiss Quick Palette | Hides floating window without pasting |
+
+---
 
 ## Technology Stack
 
-- Frontend: React 18 + Vite
-- Desktop runtime: Tauri 2 (Rust backend)
-- Tauri plugins:
-	- `@tauri-apps/plugin-clipboard-manager`
-	- `@tauri-apps/plugin-store`
-	- `@tauri-apps/plugin-opener`
-- Platform integrations:
-	- Wayland utilities: `wl-copy`, `wl-paste`, `wtype`
-	- Hyprland utility: `hyprctl`
-	- IPC: Unix socket at `/tmp/weaver.sock`
+- **Frontend**: React 18, Vite, Vanilla CSS custom properties.
+- **Backend / Desktop Runtime**: Tauri 2 (Rust), `tauri-plugin-clipboard-manager`, `tauri-plugin-store`.
+- **System Integrations**: `wl-clipboard`, `wtype`, `xclip`, `xdotool`, `hyprctl`.
+- **IPC Layer**: Unix domain socket server (`/tmp/weaver.sock`).
+- **AI Vision Engine**: Local Ollama API endpoint (`qwen2.5vl:7b`) or remote OpenAI Chat Completions API.
 
-## Requirements
+---
 
-### General
+## Environment Configuration
+
+Weaver loads default LLM settings from a `.env` file in the project root:
+
+1. Copy `.env.sample` to `.env`:
+```bash
+cp .env.sample .env
+```
+
+2. Configure environment variables:
+```env
+# Ollama or OpenAI-compatible Chat Completions endpoint
+WEAVER_LLM_ENDPOINT=http://localhost:11434/v1/chat/completions
+
+# Vision Model ID (e.g. qwen2.5vl:7b, gpt-4o)
+WEAVER_LLM_MODEL=qwen2.5vl:7b
+
+# API Key (optional for local Ollama, required for remote OpenAI)
+WEAVER_LLM_API_KEY=
+
+# Default OCR instruction prompt
+WEAVER_LLM_SYSTEM_PROMPT="Perform OCR on this image. Transcribe all text, code, and symbols line by line exactly as shown. Do not skip any lines, summarize, or add commentary. Return raw text only."
+```
+
+Settings configured via the in-app AI OCR settings panel take precedence during runtime.
+
+---
+
+## Installation & Development
+
+### Prerequisites
 
 - Node.js (LTS recommended)
 - `pnpm`
 - Rust toolchain (`rustup`, `cargo`)
-- System dependencies required by Tauri for Linux builds
+- Linux system build dependencies for Tauri 2
 
-### Wayland / Hyprland Workflow
+### System Dependencies (Linux)
 
-Install these utilities if you want all keyboard integrations to work:
+For Wayland / Hyprland shortcut execution and clipboard operations:
 
-- `wl-clipboard` (provides `wl-copy`, `wl-paste`)
-- `wtype`
-- `hyprctl` (from Hyprland)
-- `python3` (used for lightweight IPC trigger command)
+```bash
+# Ubuntu / Debian
+sudo apt install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf wtype xdotool wl-clipboard xclip
+```
 
-### X11 Fallback Utilities
+### Running Locally
 
-- `xclip`
-- `xdotool`
-
-## Installation
-
+1. Install frontend dependencies:
 ```bash
 pnpm install
 ```
 
-## Environment Configuration
-
-Weaver reads LLM defaults from `.env` in the project root.
-
-1. Copy the template:
-
-```bash
-cp .env.example .env
-```
-
-2. Configure values as needed:
-
-- `WEAVER_LLM_ENDPOINT`
-- `WEAVER_LLM_MODEL`
-- `WEAVER_LLM_API_KEY`
-- `WEAVER_LLM_SYSTEM_PROMPT`
-
-The UI settings panel is still editable; values from `.env` are used as defaults.
-
-## Running in Development
-
-Run the full Tauri app:
-
+2. Start the Tauri development application:
 ```bash
 pnpm tauri dev
 ```
 
-Build frontend assets:
-
+3. Build production installers (`.deb`, `.rpm`, `.AppImage`):
 ```bash
-pnpm build
+pnpm tauri build
 ```
 
-Run Rust compile check only:
+Production installers will be generated in `src-tauri/target/release/bundle/`.
 
-```bash
-cd src-tauri
-cargo check
+---
+
+## Architecture Overview
+
+```
+                          +-------------------------+
+                          |   System Clipboard /    |
+                          |    Primary Selection    |
+                          +------------+------------+
+                                       |
+                                       v
++------------------------+    +------------------+    +-----------------------+
+| Hyprland / X11 Hotkeys | -> | Unix IPC Socket  | -> | Tauri 2 (Rust Core)   |
+| (Ctrl+Alt+W/C/Up/Down) |    | /tmp/weaver.sock |    | System Tray / Window  |
++------------------------+    +------------------+    +-----------+-----------+
+                                                                  |
+                                                                  v
++------------------------+                            +-----------------------+
+|  Local Ollama Vision   | <========================= | React 18 Frontend     |
+|   (qwen2.5vl:7b)       |     OCR Vision Requests    | (History & QuickTray) |
++------------------------+                            +-----------------------+
 ```
 
-## Usage
-
-### Clipboard History
-
-- Open Weaver from the tray menu
-- Clipboard entries are captured automatically
-- Use search to filter history
-- Use copy/delete controls on each item
-
-### Quick Paste Picker
-
-- Trigger the quick picker shortcut
-- Navigate with arrow keys
-- Press Enter to paste selection into the previously focused app
-- Press Escape to dismiss
-
-### Append/Prepend Merge Workflow
-
-This is implemented to avoid creating standalone clipboard entries for intermediate text:
-
-1. Copy base text A (`Ctrl+C`)
-2. Highlight text B (without copying)
-3. Press append shortcut to produce `A + "\n" + B`
-4. Or highlight text C and press prepend shortcut to produce `C + "\n" + A`
-
-Only merged output is written back to clipboard/history in this workflow.
-
-## Architecture
-
-### Frontend (React)
-
-- `App.jsx`: main clipboard history UI
-- `QuickTray.jsx`: quick picker component
-- `QuickTrayWindow.jsx`: dedicated quicktray window entry point
-- Store persistence through Tauri Store plugin
-
-### Backend (Rust / Tauri)
-
-- Main runtime and tray handling in `src-tauri/src/lib.rs`
-- Dedicated commands for paste confirmation and dismiss
-- IPC server listens on `/tmp/weaver.sock`
-- Hyprland keybinds are registered at startup
-- Duplicate keybind accumulation is prevented by unbinding before binding
-
-### Windows
-
-- `main`: hidden by default, standard app UI
-- `quicktray`: transparent always-on-top picker window
-
-## Keyboard Shortcuts
-
-Default Hyprland runtime bindings:
-
-- `Ctrl+Alt+W`: open quick-paste picker
-- `Ctrl+Alt+Down`: append highlighted text to current clipboard text
-- `Ctrl+Alt+Up`: prepend highlighted text to current clipboard text
-
-## Troubleshooting
-
-### Port 1420 is already in use
-
-Vite dev server runs on port `1420` during `pnpm tauri dev`.
-If the port is occupied, stop the previous process and restart.
-
-### Shortcut action fires multiple times
-
-This usually means duplicate compositor binds were previously registered.
-Weaver now unbinds before binding at startup; restart the app to normalize binds.
-
-### Clipboard merge does not work on Wayland
-
-Check availability of:
-
-- `wl-copy`
-- `wl-paste`
-- `wtype`
-- `hyprctl`
-
-### Rust compiles but app startup fails
-
-Run both layers separately to isolate issues:
-
-```bash
-pnpm dev
-cd src-tauri && cargo check
-```
+---
 
 ## License
 
-This project currently does not declare a license file. Add one if you plan to distribute publicly.
+MIT License. See `LICENSE` for details.
