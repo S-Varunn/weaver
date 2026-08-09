@@ -1,5 +1,6 @@
 use base64::Engine;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::unix::net::UnixListener;
 use std::sync::Mutex;
 use tauri::{
@@ -8,6 +9,7 @@ use tauri::{
     Emitter, Manager, State,
 };
 
+#[cfg(unix)]
 const SOCKET_PATH: &str = "/tmp/weaver.sock";
 const ENV_LLM_ENDPOINT: &str = "WEAVER_LLM_ENDPOINT";
 const ENV_LLM_MODEL: &str = "WEAVER_LLM_MODEL";
@@ -664,6 +666,7 @@ fn toggle_window(app: &tauri::AppHandle) {
 /// Start a Unix domain socket IPC server so external processes (e.g. Hyprland
 /// keybinds triggered via `hyprctl keyword bind`) can open the quick-tray even
 /// on Wayland where in-process global shortcuts do not fire across windows.
+#[cfg(unix)]
 fn start_ipc_server(app_handle: tauri::AppHandle) {
     let _ = std::fs::remove_file(SOCKET_PATH); // Remove stale socket
     let listener = match UnixListener::bind(SOCKET_PATH) {
@@ -697,9 +700,6 @@ fn start_ipc_server(app_handle: tauri::AppHandle) {
                                 let _ = app_handle.emit("analyze-image-shortcut", serde_json::json!({}));
                             }
                             cmd @ ("append-clip" | "prepend-clip") => {
-                                // base  = current clipboard (text A, already in history)
-                                // selected = highlighted text (text B/C, never copied,
-                                //            never enters history as a standalone entry)
                                 if let (Some(base), Some(selected)) =
                                     (read_clipboard_text(), read_primary_selection())
                                 {
@@ -726,18 +726,10 @@ fn start_ipc_server(app_handle: tauri::AppHandle) {
     });
 }
 
-/// Register Hyprland compositor-level keybinds via `hyprctl keyword bind`.
-/// These are runtime dispatches — they do not persist across compositor
-/// restarts, but Weaver re-registers them on each launch.
-///
-/// Registered binds:
-///   Ctrl+Alt+W     → open quick-tray picker
-///   Ctrl+Alt+Down  → append highlighted (primary selection) text after clipboard
-///   Ctrl+Alt+Up    → prepend highlighted (primary selection) text before clipboard
-///
-/// Workflow: copy text A with Ctrl+C, then SELECT (highlight) text B without
-/// copying, then press Ctrl+Alt+Down → clipboard becomes "A\nB". B is never
-/// stored in clipboard history as a standalone entry.
+#[cfg(not(unix))]
+fn start_ipc_server(_app_handle: tauri::AppHandle) {}
+
+#[cfg(unix)]
 fn register_hyprland_keybind() {
     if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_err() {
         return;
@@ -751,7 +743,6 @@ fn register_hyprland_keybind() {
     ];
 
     for (combo, msg) in keybinds {
-        // Unbind first to avoid accumulating duplicate bindings across restarts.
         let _ = std::process::Command::new("hyprctl")
             .args(["keyword", "unbind", combo])
             .output();
@@ -774,6 +765,9 @@ fn register_hyprland_keybind() {
         }
     }
 }
+
+#[cfg(not(unix))]
+fn register_hyprland_keybind() {}
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -827,6 +821,7 @@ pub fn run() {
                         }
                     }
                     "quit" => {
+                        #[cfg(unix)]
                         let _ = std::fs::remove_file(SOCKET_PATH);
                         app.exit(0);
                     }
