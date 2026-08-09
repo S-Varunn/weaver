@@ -766,8 +766,17 @@ pub fn run() {
                 .item(&quit_item)
                 .build()?;
 
-            TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+            let icon_bytes = include_bytes!("../icons/32x32.png");
+            let tray_icon = if let Ok(decoded) = image::load_from_memory(icon_bytes) {
+                let rgba = decoded.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                tauri::image::Image::new_owned(rgba.into_raw(), w, h)
+            } else {
+                app.default_window_icon().unwrap().clone()
+            };
+
+            TrayIconBuilder::with_id("weaver-tray-v2")
+                .icon(tray_icon)
                 .menu(&menu)
                 .tooltip("Weaver — Clipboard Manager\nCtrl+Alt+W to quick paste")
                 .on_menu_event(|app, event| match event.id().as_ref() {
