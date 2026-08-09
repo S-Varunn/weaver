@@ -220,6 +220,14 @@ body {
   justify-content: center;
   color: #ffffff;
   box-shadow: 0 2px 8px rgba(99, 102, 241, 0.35);
+  overflow: hidden;
+}
+
+.brand-icon-img {
+  width: 24px;
+  height: 24px;
+  object-fit: contain;
+  border-radius: 5px;
 }
 
 .brand-title-area {

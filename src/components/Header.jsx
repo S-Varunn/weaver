@@ -23,7 +23,7 @@ export default function Header({
       <div className="header-top">
         <div className="brand-group">
           <div className="brand-icon-wrapper">
-            <ClipboardIcon size={18} className="brand-icon" />
+            <img src="/app-icon.png" alt="Weaver Icon" className="brand-icon-img" />
           </div>
           <div className="brand-title-area">
             <h1 className="app-title">Weaver</h1>
